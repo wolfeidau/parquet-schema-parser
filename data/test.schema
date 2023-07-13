@@ -1,0 +1,17 @@
+required group field_id=-1 spark_schema {
+  optional byte_array field_id=-1 identity_line_item_id (String);
+  optional byte_array field_id=-1 identity_time_interval (String);
+  optional byte_array field_id=-1 bill_invoice_id (String);
+  optional byte_array field_id=-1 bill_invoicing_entity (String);
+  optional byte_array field_id=-1 bill_billing_entity (String);
+  optional byte_array field_id=-1 bill_bill_type (String);
+  optional byte_array field_id=-1 bill_payer_account_id (String);
+  optional int96 field_id=-1 bill_billing_period_start_date;
+  optional int96 field_id=-1 bill_billing_period_end_date;
+  optional byte_array field_id=-1 line_item_usage_account_id (String);
+  optional byte_array field_id=-1 line_item_line_item_type (String);
+  optional double field_id=-1 line_item_usage_amount;
+  optional double field_id=-1 line_item_normalization_factor;
+  optional double field_id=-1 line_item_normalized_usage_amount;
+  optional int64 field_id=-1 bill_billing_period_start_date (Timestamp(isAdjustedToUTC=true, timeUnit=milliseconds, is_from_converted_type=true, force_set_converted_type=false));
+}

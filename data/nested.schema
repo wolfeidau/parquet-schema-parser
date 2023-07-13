@@ -1,0 +1,15 @@
+required group field_id=-1 spark_schema {
+  optional group field_id=-1 a (Map) {
+    repeated group field_id=-1 key_value {
+      required byte_array field_id=-1 key (String);
+      optional group field_id=-1 value (Map) {
+        repeated group field_id=-1 key_value {
+          required int32 field_id=-1 key;
+          required boolean field_id=-1 value;
+        }
+      }
+    }
+  }
+  required int32 field_id=-1 b;
+  required double field_id=-1 c;
+}
