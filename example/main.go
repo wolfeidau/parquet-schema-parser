@@ -23,6 +23,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	log.SetFlags(log.Ltime | log.Lshortfile)
+
 	rdr, err := os.Open(*schemaPath)
 	if err != nil {
 		log.Fatalf("failed to read file: %s", err)

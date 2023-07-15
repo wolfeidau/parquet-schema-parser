@@ -1,9 +1,9 @@
 package parquetschemaparser
 
 import (
-	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 
@@ -14,21 +14,12 @@ import (
 func ParseSchema(rdr io.Reader) (schema.Node, error) {
 	sct := NewSchemaTokenizer(rdr, " ,;{}()\n\t=")
 
-	t, err := sct.NextToken()
+	repetition, err := asRepetition(sct)
 	if err != nil {
 		return nil, fmt.Errorf("reading token failed at %s with: %w", sct.GetLocation(), err)
 	}
 
-	repetition, err := asRepetition(t, sct)
-	if err != nil {
-		return nil, fmt.Errorf("reading token failed at %s with: %w", sct.GetLocation(), err)
-	}
-
-	t, err = sct.NextToken()
-	if err != nil {
-		return nil, fmt.Errorf("reading token failed at %s with: %w", sct.GetLocation(), err)
-	}
-
+	t := sct.NextToken()
 	if t != "group" {
 		return nil, fmt.Errorf("expected top level group node, got: %s", t)
 	}
@@ -42,52 +33,27 @@ func ParseSchema(rdr io.Reader) (schema.Node, error) {
 }
 
 func asGroup(repetition parquet.Repetition, sct *SchemaTokenizer) (*schema.GroupNode, error) {
-
 	// grab next token
-	t, err := sct.NextToken()
-	if err != nil {
-		return nil, err
-	}
 
-	var id int32 = -1
+	var (
+		id  int32 = -1
+		err error
+	)
 
-	if t == "field_id" {
+	if peak := sct.PeakToken(); peak == "field_id" {
 		// read the field id
-		id, err = asFieldID(t, sct)
+		id, err = asFieldID(sct)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	// read the identifier
-	name, err := sct.NextToken()
-	if err != nil {
-		return nil, err
-	}
+	name := sct.NextToken()
 
-	// t, err = sct.NextToken()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// if t == "(" {
-	// 	// can be a Map or a List
-
-	// }
-
-	peak, err := sct.PeakToken()
-	if err != nil {
-		return nil, err
-	}
-
-	if peak == "(" {
-		return nil, fmt.Errorf("wanted something, got: %s", peak)
-	}
-
-	// read the left brace
-	_, err = sct.AssertNextToken("check opening brace", "{")
-	if err != nil {
-		return nil, err
+	if peak := sct.PeakToken(); peak == "(" {
+		// can be Map or List
+		return asLogicalGroup(name, repetition, sct)
 	}
 
 	fields, err := readFields(sct)
@@ -99,81 +65,83 @@ func asGroup(repetition parquet.Repetition, sct *SchemaTokenizer) (*schema.Group
 }
 
 func readFields(sct *SchemaTokenizer) (schema.FieldList, error) {
+	// read the left brace
+	err := sct.AssertNextToken("check opening brace", "{")
+	if err != nil {
+		return nil, err
+	}
 
 	fields := schema.FieldList{}
 
 	for {
 
 		// grab next token
-		t, err := sct.NextToken()
-		if err != nil {
-			return nil, err
-		}
 
-		if t == "}" {
+		if peak := sct.PeakToken(); peak == "}" {
 			break
 		}
 
-		repetition, err := asRepetition(t, sct)
+		fld, err := readField(sct)
 		if err != nil {
 			return nil, err
 		}
 
-		// grab next token
-		t, err = sct.NextToken()
-		if err != nil {
-			return nil, err
-		}
+		fields = append(fields, fld)
+	}
 
-		if t == "group" {
-			group, err := asGroup(repetition, sct)
-			if err != nil {
-				return nil, err
-			}
-
-			fields = append(fields, group)
-		} else {
-
-			fld, err := asField(t, repetition, sct)
-			if err != nil {
-				return nil, err
-			}
-
-			fields = append(fields, fld)
-		}
+	// read the right brace
+	err = sct.AssertNextToken("check closing brace", "}")
+	if err != nil {
+		return nil, err
 	}
 
 	return fields, nil
 }
 
-func asField(t string, repetition parquet.Repetition, sct *SchemaTokenizer) (schema.Node, error) {
+func readField(sct *SchemaTokenizer) (schema.Node, error) {
+	repetition, err := asRepetition(sct)
+	if err != nil {
+		return nil, err
+	}
+
+	// grab next token
+	t := sct.NextToken()
+
+	if t == "group" {
+		group, err := asGroup(repetition, sct)
+		if err != nil {
+			return nil, err
+		}
+
+		return group, nil
+	}
+
+	fld, err := asFieldNode(t, repetition, sct)
+	if err != nil {
+		return nil, err
+	}
+
+	return fld, nil
+}
+
+func asFieldNode(t string, repetition parquet.Repetition, sct *SchemaTokenizer) (schema.Node, error) {
 	// type info
 	typ, err := asType(t, sct)
 	if err != nil {
 		return nil, err
 	}
 
-	t, err = sct.NextToken()
-	if err != nil {
-		return nil, err
-	}
-
 	var id int32 = -1
 
-	if t == "field_id" {
+	if peak := sct.PeakToken(); peak == "field_id" {
 		// read the field id
-		id, err = asFieldID(t, sct)
+		id, err = asFieldID(sct)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	name, err := sct.NextToken()
-	if err != nil {
-		return nil, err
-	}
-
-	t, err = sct.NextToken()
+	name := sct.NextToken()
 	if err != nil {
 		return nil, err
 	}
@@ -181,18 +149,13 @@ func asField(t string, repetition parquet.Repetition, sct *SchemaTokenizer) (sch
 	var fld schema.Node
 
 	// does this field have a logical type
-	if t == "(" {
+	if peak := sct.PeakToken(); peak == "(" {
 		ltype, err := asLogicalType(sct)
 		if err != nil {
 			return nil, err
 		}
 
 		fld, err = schema.NewPrimitiveNodeLogical(name, repetition, ltype, typ, -1, id)
-		if err != nil {
-			return nil, err
-		}
-
-		t, err = sct.NextToken()
 		if err != nil {
 			return nil, err
 		}
@@ -205,36 +168,168 @@ func asField(t string, repetition parquet.Repetition, sct *SchemaTokenizer) (sch
 		}
 	}
 
-	if t != ";" {
-		return nil, fmt.Errorf("unable to locate closing semi for field: %s", t)
+	err = sct.AssertNextToken("check closing semi colon", ";")
+	if err != nil {
+		return nil, err
 	}
 
 	return fld, nil
 }
 
+func asLogicalGroup(name string, repetition parquet.Repetition, sct *SchemaTokenizer) (*schema.GroupNode, error) {
+	err := sct.AssertNextToken("check first token is bracket", "(")
+	if err != nil {
+		return nil, err
+	}
+
+	lt := sct.NextToken()
+
+	log.Println("parsing logical group:", lt)
+
+	err = sct.AssertNextToken("check is closing bracket", ")")
+	if err != nil {
+		return nil, err
+	}
+
+	switch lt {
+	case "Map":
+		return asMap(name, repetition, sct)
+	case "List":
+		return asList(name, repetition, sct)
+	default:
+		return nil, fmt.Errorf("unknown logical type: %s", lt)
+	}
+}
+
+func asMap(name string, repetition parquet.Repetition, sct *SchemaTokenizer) (*schema.GroupNode, error) {
+	// <map-repetition> group <name> (MAP) {
+	//   repeated group key_value {
+	//     required <key-type> key;
+	//     <value-repetition> <value-type> value;
+	//   }
+	// }
+
+	err := sct.AssertNextToken("check first token is brace", "{")
+	if err != nil {
+		return nil, err
+	}
+
+	err = sct.AssertNextToken("check repetition", "repeated")
+	if err != nil {
+		return nil, err
+	}
+
+	err = sct.AssertNextToken("check group", "group")
+	if err != nil {
+		return nil, err
+	}
+
+	var id int32 = -1
+
+	if peak := sct.PeakToken(); peak == "field_id" {
+		// read the field id
+		id, err = asFieldID(sct)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = sct.AssertNextToken("check name is key_value", "key_value")
+	if err != nil {
+		return nil, err
+	}
+
+	fields, err := readFields(sct)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(fields) != 2 {
+		return nil, fmt.Errorf("expected 2 fields for map, got: %d", len(fields))
+	}
+
+	err = sct.AssertNextToken("check end brace", "}")
+	if err != nil {
+		return nil, err
+	}
+
+	return schema.MapOf(name, fields[0], fields[1], repetition, int32(id))
+}
+
+func asList(name string, repetition parquet.Repetition, sct *SchemaTokenizer) (*schema.GroupNode, error) {
+
+	// <list-repetition> group <name> (LIST) {
+	//   repeated group list {
+	//     <element-repetition> <element-type> element;
+	//   }
+	// }
+
+	err := sct.AssertNextToken("check first token is brace", "{")
+	if err != nil {
+		return nil, err
+	}
+
+	err = sct.AssertNextToken("check repetition", "repeated")
+	if err != nil {
+		return nil, err
+	}
+
+	err = sct.AssertNextToken("check group", "group")
+	if err != nil {
+		return nil, err
+	}
+
+	var id int32 = -1
+
+	if peak := sct.PeakToken(); peak == "field_id" {
+		// read the field id
+		id, err = asFieldID(sct)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = sct.AssertNextToken("check name is list", "list")
+	if err != nil {
+		return nil, err
+	}
+
+	fields, err := readFields(sct)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(fields) != 1 {
+		return nil, fmt.Errorf("expected 1 field for list, got: %d", len(fields))
+	}
+
+	err = sct.AssertNextToken("check end brace", "}")
+	if err != nil {
+		return nil, err
+	}
+
+	return ListOf(name, fields[0], repetition, int32(id))
+}
+
 func asLogicalType(sct *SchemaTokenizer) (schema.LogicalType, error) {
-	logicalType, err := sct.NextToken()
+	err := sct.AssertNextToken("check first token is bracket", "(")
 	if err != nil {
 		return nil, err
 	}
 
 	var lgt schema.LogicalType
 
-	fmt.Println(logicalType)
-
-	switch logicalType {
-	case "String":
+	switch lt := sct.NextToken(); {
+	case lt == "String":
 		lgt = schema.StringLogicalType{}
-	case "Map":
-		lgt = schema.MapLogicalType{}
-	case "Timestamp":
+	case lt == "Timestamp":
 		// read the params for the timestamp type
 		params, err := readLogicalTypeParams(sct)
 		if err != nil {
 			return nil, err
 		}
 
-		fmt.Println(params)
+		log.Println("timestamp", params)
 
 		tu, err := asTimeUnit(params["timeUnit"])
 		if err != nil {
@@ -247,10 +342,10 @@ func asLogicalType(sct *SchemaTokenizer) (schema.LogicalType, error) {
 			lgt = schema.NewTimestampLogicalType(asBool(params["isAdjustedToUTC"]), tu)
 		}
 	default:
-		return nil, fmt.Errorf("unknown logical type: %s", logicalType)
+		return nil, fmt.Errorf("unknown logical type: %s", lt)
 	}
 
-	_, err = sct.AssertNextToken("check closing bracket for logical type", ")")
+	err = sct.AssertNextToken("check closing bracket for logical type", ")")
 	if err != nil {
 		return nil, err
 	}
@@ -261,10 +356,7 @@ func asLogicalType(sct *SchemaTokenizer) (schema.LogicalType, error) {
 func readLogicalTypeParams(sct *SchemaTokenizer) (map[string]string, error) {
 	params := make(map[string]string)
 
-	t, err := sct.NextToken()
-	if err != nil {
-		return nil, err
-	}
+	t := sct.NextToken()
 
 	if t != "(" {
 		return nil, fmt.Errorf("expected '(' got: %s", t)
@@ -272,24 +364,18 @@ func readLogicalTypeParams(sct *SchemaTokenizer) (map[string]string, error) {
 
 	// read till the end bracket
 	for {
-		name, err := sct.NextToken()
+		name := sct.NextToken()
+
+		err := sct.AssertNextToken("check equal for attribute", "=")
 		if err != nil {
 			return nil, err
 		}
 
-		_, err = sct.AssertNextToken("check equal for attribute", "=")
-		if err != nil {
-			return nil, err
-		}
-
-		val, err := sct.NextToken()
-		if err != nil {
-			return nil, err
-		}
+		val := sct.NextToken()
 
 		params[name] = val
 
-		t, err = sct.NextToken()
+		t = sct.NextToken()
 		if err != nil {
 			return nil, err
 		}
@@ -306,22 +392,20 @@ func readLogicalTypeParams(sct *SchemaTokenizer) (map[string]string, error) {
 	return params, nil
 }
 
-func asFieldID(t string, sct *SchemaTokenizer) (int32, error) {
-	if t != "field_id" {
-		return 0, errors.New("expected field_id")
-	}
-
-	_, err := sct.AssertNextToken("check equal for field id", "=")
+func asFieldID(sct *SchemaTokenizer) (int32, error) {
+	err := sct.AssertNextToken("check next token is field_id", "field_id")
 	if err != nil {
 		return 0, err
 	}
 
-	t, err = sct.NextToken()
+	err = sct.AssertNextToken("check equal for field id", "=")
 	if err != nil {
 		return 0, err
 	}
 
-	i, err := strconv.ParseInt(t, 10, 32)
+	val := sct.NextToken()
+
+	i, err := strconv.ParseInt(val, 10, 32)
 	if err != nil {
 		return 0, err
 	}
@@ -329,8 +413,10 @@ func asFieldID(t string, sct *SchemaTokenizer) (int32, error) {
 	return int32(i), nil // field id is a 32 bit int
 }
 
-func asRepetition(t string, sct *SchemaTokenizer) (parquet.Repetition, error) {
-	switch t {
+func asRepetition(sct *SchemaTokenizer) (parquet.Repetition, error) {
+	rep := sct.NextToken()
+
+	switch rep {
 	case parquet.Repetitions.Optional.String():
 		return parquet.Repetitions.Optional, nil
 	case parquet.Repetitions.Required.String():
@@ -338,7 +424,7 @@ func asRepetition(t string, sct *SchemaTokenizer) (parquet.Repetition, error) {
 	case parquet.Repetitions.Repeated.String():
 		return parquet.Repetitions.Repeated, nil
 	default:
-		return 0, fmt.Errorf("expected one of %s but found %s", parquet.Repetitions, t)
+		return 0, fmt.Errorf("expected one of %s but found %s", parquet.Repetitions, rep)
 	}
 }
 
@@ -379,4 +465,16 @@ func asTimeUnit(val string) (schema.TimeUnitType, error) {
 		return schema.TimeUnitNanos, nil
 	}
 	return 0, fmt.Errorf("unknown time unit: %s", val)
+}
+
+func ListOf(listName string, n schema.Node, rep parquet.Repetition, fieldID int32) (*schema.GroupNode, error) {
+	if rep == parquet.Repetitions.Repeated || n.RepetitionType() == parquet.Repetitions.Repeated {
+		return nil, fmt.Errorf("parquet: listof repetition and element repetition must not be repeated, got %s", rep)
+	}
+
+	list, err := schema.NewGroupNode("list" /* name */, parquet.Repetitions.Repeated, schema.FieldList{n}, -1 /* fieldID */)
+	if err != nil {
+		return nil, err
+	}
+	return schema.NewGroupNodeLogical(listName, rep, schema.FieldList{list}, schema.ListLogicalType{}, fieldID)
 }
